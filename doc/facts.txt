@@ -1,0 +1,276 @@
+------------------
+Floppy Drive Facts
+------------------
+
+Compiled by: Joseph H. Allen
+
+These facts have been gleaned from multiple sources including WD1770 data
+sheet, 82077AA data sheet, floppy drive YD-702D-6238D and X1De-xxA data
+sheets and logic analyzer trace of read data line.
+
+Information for standard high density 3.5" floppy disk:
+
+There are 80 cylinders, and two sides for a total of 160 tracks.
+
+The disk rotates at 300 RPM (5 rotations / sec, 200ms / rotation).
+
+The bit rate before encoding is 500 Kb/sec.  Two 'cells' are used per bit
+for MFM: one clock cell and one data cell.  The cell rate is 1 M cells/sec.
+
+One disk can thus store 2,000,000 bytes with all formatting overhead
+discounted.
+
+Data is stored as magnetic flux reversals.  When a flux reversal is
+detected, a short negative pulse is generated on the read_data_l line.  When
+a flux reversal is to be written, a short negative pulse is generated on the
+write_data_l line.
+
+Data is encoded as MFM (modified frequency modulation): each bit is sent as
+two cells.  The first cell is the clock cell, the second is the data cell. 
+A pulse in the data cell means the data bit is 1, no pulse in the data cell
+means the data bit is 0.  To reduce the density of flux reversals, the clock
+cell has a pulse only when the data cell is a 0 and the previous bit was
+also a zero.  Otherwise no pulse is sent in the clock cell.
+
+For example, to send 110010001 in MFM:
+
+|   1   |   1   |   0   |   0   |   1   |   0   |   0   |   0   |   1   |
+|   |   |   |   |   |   |   |   |   |   |   |   |   |   |   |   |   |   |
+------_-------_-----------_-----------_-----------_-------_-----------_--
+
+Unfortunately on inner cylinders the density is so high that there are some
+ISI (inter symbol interference) effects: basically two flux reversals
+recorded close together get spread apart if there are no surrounding flux
+reversals to contain them.  To account for this, write data is
+precompensated as follows (from WD177x data sheet):
+
+X  1  1  0    Early
+X  0  1  1    Late
+0  0  0  1    Early
+1  0  0  0    Late
+----  -  -
+  |   |  |
+  |   |  +-- next bit
+  |   +----- current bit
+  +--------- previous bits
+
+The flux reversal of the current bit is made 125us early or late as
+indicated above.  If there is a long gap of no flux reversals followed by
+two closely spaced flux reversals, the first reversal of the two is made
+late.  If there are two closely spaced flux reversals followed by a long
+gap, the second flux reversal of the two is made early.
+
+[On which cylinder do we start precompensation?]
+
+Byte/Sector Format
+------------------
+
+Bytes are transmitted MSB first.
+
+This is the format of a single track, beginning with the index pulse:
+
+Repeat Count   Byte
+------------   -----
+    80         4E      GAP 0
+    12         00      SYNC
+     3         C2*     Index hole address mark
+     1         FC
+    50         4E      GAP 1
+total=146 bytes
+
+repeat 18 times, once for each sector:
+--------------------------------
+    12         00      SYNC
+     3         A1*     Header address mark
+     1         FE
+     1         Track
+     1         Head
+     1         Sector
+     1         No. bytes
+     2         CRC
+    22         4E      GAP 2
+    12         00      SYNC
+     3         A1*     Data address mark
+     1         FB or F8 (always write FB)
+   512         data
+     2         CRC
+    84         4E      GAP 3
+--------------------------------
+total=658 * 18 = 11844 bytes
+
+   510         4E      GAP 4
+total=510 bytes
+
+total for entire track=12500 bytes
+
+
+Field values:
+-------------
+
+Track: 0 - 79
+
+Head: 0 - 1
+
+Sector: 1 - 18
+
+No. bytes in sector code: 2=512  (0=128, 1=256, 3=1024, 4=2048, etc.)
+
+Address marks have an illegal (non-MFM) clock pattern to make them unique
+codes:
+
+  Data    Clock
+  ----    -----
+
+   A1      0A   (normal clock pattern is "0E")
+   C2      14   (normal clock pattern is "1C")
+
+Other address marks used in older formats:
+
+   FE      C7
+   FC      D7
+   FB      C7
+   F8      C7
+
+16-bit CRC uses polynomial: x^16 + x^12 + x^5 + 1
+
+CRC accumulator is initialized to FFFF.
+
+All bytes including the A1s and the two CRC byte are counted in the CRC
+checker.  If the result is 0, the CRC check passes.
+
+MSB of each byte is fed into CRC shift register first.
+
+When CRC is appended to the data, the MS byte of the CRC accumulator is
+appended first, then the LS byte.
+
+The CRC bytes are fed into the CRC shift register MSB first (just like the
+data bytes).
+
+Some C code:
+
+/* x^16 + x^12 + x^5 + 1 CRC */
+/* Append remainder (contents of fcs) to message: MSB of remainder goes first. */
+/* Next time through, remainder will be zero. */
+/* fcs is typically initialized to 0xFFFF */
+
+/* Update FCS after one new byte (note that the MSB is taken first even
+   though the LSB is transmitted first) */
+
+unsigned short serial_crc(unsigned short fcs,unsigned char c)
+  {
+  int i;
+  for(i=0;i!=8;++i)
+    {
+    fcs = ((fcs&0x8000)>>15)^(c>>7) ? (fcs<<1)^0x1021 : (fcs<<1);
+
+    c = (c<<1);
+    }
+  return fcs;
+  }
+
+Floppy drive connector pins
+---------------------------
+
+(this is the connector on the drive itself: beware of cable twist in IBM PC
+floppy cable).
+
+|   GND   | Signal |
+     1        2      N.C. (high_density_l on older drives)
+     3        4      N.C.
+     5        6      N.C.
+     7        8      index_l
+     9       10      N.C.
+    11       12      drive_select_l
+    13       14      N.C.
+    15       16      motor_on_l
+    17       18      direction_l
+    19       20      step_l
+    21       22      write_data_l
+    23       24      write_enable_l
+    25       26      cylinder0_l (also called track0_l)
+    27       28      write_protect_l
+    29       30      read_data_l
+    31       32      side_one_l
+    33       34      disk_change_l
+
+All signals use open collector TTL drivers.  Each input pin has 1K pullup to
+5V.  TTL "7438" is a typical driver chip.  TTL "74LS14" is typical receiver
+chip.
+
+Inputs to drive:
+
+ drive_select_l: the "in use" LED will turn on and the remaining signals are
+ valid.
+
+   Wait .5 us after drive_select_l going low before doing anything.
+
+ motor_on_l: the spindle motor turns on when this is low and a disk is in the
+ drive.  Drive select is ignored for this signal.
+
+   Wait 200ms from motor_on_l to first step.
+
+   Wait 500ms from motor_on_l before start writing.
+
+ direction_l: when low, pulses on step_l move the head "in" towards the
+ center or the disk (toward higher numbered cylinders).  When high, pulses on
+ stop_l move the head "out" towards the edge of the disk (toward "cylinder 0").
+
+   Wait 1 us from change on direction_l to step_l leading edge.
+
+   Wait 1 us from step_l trailing edge to change on direction_l.
+
+ step_l: each low going pulse moves the head by one cylinder (step occurs on
+ rising edge).
+
+   Step pulse should be at least 1us in length.
+
+   The step rate is 3ms between pulses.
+
+   However, if the direction is changed during stepping, 4ms is required.
+
+   After the last step, wait 18ms for heads to settle before writing.
+
+ side_one_l: when low, side 1 is selected, otherwise side 0 is selected. 
+ After switching sides, a 100us delay is required before writing.
+
+ write_data_l: each low going pulse records a flux reversal on the disk. 
+ minimum pulse width is 125 us.  Flux reversal is recorded on leading edge
+ (high to low) of pulse.
+
+ write_enable_l: enable writing of data to disk when low.  When deactivated,
+ wait 650us before stepping or changing sides because erase head could still
+ be energized.
+
+   Wait 4 us from write_enable_l to pulses on write_data_l.  Wait 4 us from
+   last pulse on write_data_l to deactivate write_data_l.
+
+Outputs from drive:
+
+ cylinder0_l: when low, the head assembly is one positioned over the
+ outermost cylinder.
+
+   Max 2.9ms from last step to cylinder 0 detected.
+
+   Max 17us for cylinder0_l to deactivate after stepping out of cylinder 0.
+
+ index_l: a low going pulse whenever the index hole goes by the index hole
+ optical sensor.
+
+ write_protect_l: when low, indicates disk is write protected (write protect
+ notch is open).
+
+ read_data_l: a low going pulse of at least 125ns for each flux reversal. 
+ Flux reversals are indicated by the leading (high to low) edge of pulse.
+
+ disk_change_l: low initially and whenever drive door is opened.  Goes high
+ when drive door is closed and after first step pulse has been received.
+
+Floppy power connector
+----------------------
+
+Pin Signal
+--- ------
+ 1  5V DC
+ 2  Ground
+ 3  Ground
+ 4  No connection (older drives need 12V here).
